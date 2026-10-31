@@ -367,7 +367,7 @@ const FASES = [
   ["encerrada", "03 · Votação encerrada"],
   ["apuracao", "04 · Revelar o resultado"]
 ];
-let fase = "cadastro", parts = {}, votos = {}, sel = null, fotoAtual = null;
+let fase = "cadastro", parts = {}, votos = {}, sel = null, fotoAtual = null, rodadaVotacao = 1;
 let admin = sessionStorage.getItem("adm_ok") === "1";
 let tela = admin ? "adm" : "pub";
 let db = null, firebaseOK = false;
@@ -377,7 +377,19 @@ function setStatus(){
   const labels={cadastro:"Cadastro de fantasias",votacao:"Votação aberta",encerrada:"Votação encerrada",apuracao:"Resultado revelado"};
   $("statusLabel").textContent=labels[fase]||"Votação";
 }
-function jaVotou(){try{return localStorage.getItem(CHAVE_VOTO)}catch(e){return null}}
+function jaVotou(){
+  try{
+    const salvo=localStorage.getItem(CHAVE_VOTO);
+    if(!salvo)return null;
+    // Novo formato: o voto fica vinculado à rodada atual.
+    try{
+      const registro=JSON.parse(salvo);
+      if(registro && typeof registro==="object") return Number(registro.rodada)===Number(rodadaVotacao) ? registro.p : null;
+    }catch(e){}
+    // Compatibilidade com votos gravados pela versão anterior do sistema.
+    return Number(rodadaVotacao)===1 ? salvo : null;
+  }catch(e){return null}
+}
 function contagem(){const c={};Object.keys(parts).forEach(id=>c[id]=0);Object.values(votos).forEach(v=>{if(v&&c[v.p]!==undefined)c[v.p]++});return c}
 function listaOrdenada(){const c=contagem();return Object.keys(parts).map(id=>({id,...parts[id],votos:c[id]})).sort((a,b)=>b.votos-a.votos||String(a.nome||"").localeCompare(String(b.nome||"")))}
 function render(){
@@ -411,7 +423,7 @@ function renderPublico(){
 function votar(){
   if(!sel||jaVotou()||!db)return;
   const b=$("btVotar");if(b){b.disabled=true;b.textContent="Registrando seu voto..."}
-  db.ref("votos").push({p:sel,t:Date.now()}).then(()=>{try{localStorage.setItem(CHAVE_VOTO,sel)}catch(e){}render()}).catch(()=>{if(b){b.disabled=false;b.textContent="Erro. Tente novamente"}toast("Não foi possível registrar. Verifique a conexão.")});
+  db.ref("votos").push({p:sel,t:Date.now(),rodada:rodadaVotacao}).then(()=>{try{localStorage.setItem(CHAVE_VOTO,JSON.stringify({p:sel,rodada:rodadaVotacao}))}catch(e){}render()}).catch(()=>{if(b){b.disabled=false;b.textContent="Erro. Tente novamente"}toast("Não foi possível registrar. Verifique a conexão.")});
 }
 function renderAdmin(){
   $("fases").innerHTML=FASES.map(f=>`<button class="phase-btn ${fase===f[0]?"active":""}" data-f="${f[0]}">${f[1]} ${fase===f[0]?"✓":""}</button>`).join("");
@@ -502,7 +514,22 @@ $("btSalvar").onclick=()=>{
   $("errCad").textContent="";$("btSalvar").disabled=true;
   db.ref("participantes").push({nome,fantasia:fant,foto:fotoAtual,t:Date.now()}).then(()=>{$("nome").value="";$("fant").value="";fotoAtual=null;$("prev").textContent="A foto da fantasia aparecerá aqui";toast("Participante cadastrado!")}).catch(()=>{$("errCad").textContent="Erro ao salvar. Verifique o Firebase."}).finally(()=>$("btSalvar").disabled=false);
 };
-$("btZerar").onclick=()=>{if(confirm("Tem certeza que deseja apagar TODOS os votos? Essa ação não pode ser desfeita."))db.ref("votos").remove().then(()=>toast("Votos zerados."))};
+$("btZerar").onclick=()=>{
+  if(!confirm("Tem certeza que deseja apagar TODOS os votos e liberar novamente todos os celulares? Essa ação não pode ser desfeita."))return;
+  const botao=$("btZerar");
+  if(botao)botao.disabled=true;
+  // Avança a rodada no Firebase. Todos os celulares recebem essa mudança
+  // e deixam de considerar válidos os votos guardados localmente na rodada anterior.
+  db.ref("rodadaVotacao").transaction(atual=>(Number(atual)||1)+1)
+    .then(resultado=>{
+      if(!resultado.committed)throw new Error("Não foi possível iniciar uma nova rodada.");
+      rodadaVotacao=Number(resultado.snapshot.val())||rodadaVotacao+1;
+      return db.ref("votos").remove();
+    })
+    .then(()=>{sel=null;toast("Votos zerados! Todos os celulares estão liberados para votar novamente.");render()})
+    .catch(()=>toast("Não foi possível zerar os votos. Verifique a conexão com o Firebase."))
+    .finally(()=>{if(botao)botao.disabled=false});
+};
 $("btTrava").onclick=()=>{try{localStorage.removeItem(CHAVE_VOTO)}catch(e){}toast("Este celular está liberado para votar novamente.")};
 
 function iniciarFirebase(){
@@ -515,6 +542,7 @@ function iniciarFirebase(){
   try{
     firebase.initializeApp(firebaseConfig);db=firebase.database();firebaseOK=true;
     db.ref("fase").on("value",s=>{fase=s.val()||"cadastro";render()});
+    db.ref("rodadaVotacao").on("value",s=>{rodadaVotacao=Number(s.val())||1;render()});
     db.ref("participantes").on("value",s=>{parts=s.val()||{};render()});
     db.ref("votos").on("value",s=>{votos=s.val()||{};render()});
   }catch(err){$("pub").innerHTML=`<div class="panel wait"><h2>Falha ao abrir o portal</h2><p class="sub">Verifique a configuração do Firebase e recarregue a página.</p></div>`}
